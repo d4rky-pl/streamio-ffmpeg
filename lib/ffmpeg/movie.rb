@@ -14,7 +14,7 @@ module FFMPEG
 
       if remote?
         @head = head
-        raise Errno::ENOENT, "the URL '#{path}' does not exist" unless @head.code == 200
+        raise Errno::ENOENT, "the URL '#{path}' does not exist" if @head.nil? || @head.code.to_i != 200
       else
         raise Errno::ENOENT, "the file '#{path}' does not exist" unless File.exist?(path)
       end
@@ -98,9 +98,15 @@ module FFMPEG
       end
 
       @invalid = true if metadata.key?(:error)
-      @invalid = true if std_error.include?("Unsupported codec")
+      @invalid = true if std_error.include?("Unsupported codec for output stream")
       @invalid = true if std_error.include?("is not supported")
       @invalid = true if std_error.include?("could not find codec parameters")
+
+      unsupported_codecs = std_error.scan(/Unsupported codec with .* for input stream (.*)/).flatten
+      unsupported_codecs.each do |codec|
+        stream = metadata[:streams].find { |stream| stream[:index].to_s == codec }
+        @invalid = true if !stream.nil? && %w(video audio).include?(stream[:codec_type])
+      end
     end
 
     def valid?
@@ -200,7 +206,7 @@ module FFMPEG
       http = Net::HTTP.new(url.host, url.port)
       http.use_ssl = url.port == 443
       http.request_head(url.path)
-    rescue SocketError
+    rescue SocketError, Errno::ECONNREFUSED
       nil
     end
   end
