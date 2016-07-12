@@ -7,7 +7,7 @@ module FFMPEG
     attr_reader :path, :duration, :time, :bitrate, :rotation, :creation_time
     attr_reader :video_stream, :video_codec, :video_bitrate, :colorspace, :width, :height, :sar, :dar, :frame_rate
     attr_reader :audio_stream, :audio_codec, :audio_bitrate, :audio_sample_rate, :audio_channels
-    attr_reader :container
+    attr_reader :container, :std_output, :std_error
 
     def initialize(path)
       @path = path
@@ -23,17 +23,17 @@ module FFMPEG
 
       # ffmpeg will output to stderr
       command = "#{FFMPEG.ffprobe_binary} -i #{Shellwords.escape(path)} -print_format json -show_format -show_streams -show_error"
-      std_output = ''
-      std_error = ''
+      @std_output = ''
+      @std_error = ''
 
       Open3.popen3(command) do |stdin, stdout, stderr|
-        std_output = stdout.read unless stdout.nil?
-        std_error = stderr.read unless stderr.nil?
+        @std_output = stdout.read unless stdout.nil?
+        @std_error = stderr.read unless stderr.nil?
       end
 
-      fix_encoding(std_output)
+      fix_encoding(@std_output)
 
-      metadata = MultiJson.load(std_output, symbolize_keys: true)
+      metadata = MultiJson.load(@std_output, symbolize_keys: true)
 
       if metadata.key?(:error)
 
@@ -98,11 +98,11 @@ module FFMPEG
       end
 
       @invalid = true if metadata.key?(:error)
-      @invalid = true if std_error.include?("Unsupported codec for output stream")
-      @invalid = true if std_error.include?("is not supported")
-      @invalid = true if std_error.include?("could not find codec parameters")
+      @invalid = true if @std_error.include?("Unsupported codec for output stream")
+      @invalid = true if @std_error.include?("is not supported")
+      @invalid = true if @std_error.include?("could not find codec parameters")
 
-      unsupported_codecs = std_error.scan(/Unsupported codec with .* for input stream (.*)/).flatten
+      unsupported_codecs = @std_error.scan(/Unsupported codec with .* for input stream (.*)/).flatten
       unsupported_codecs.each do |codec|
         stream = metadata[:streams].find { |stream| stream[:index].to_s == codec }
         @invalid = true if !stream.nil? && %w(video audio).include?(stream[:codec_type])
