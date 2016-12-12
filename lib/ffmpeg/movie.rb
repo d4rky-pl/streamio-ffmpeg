@@ -9,6 +9,7 @@ module FFMPEG
     attr_reader :audio_streams, :audio_stream, :audio_codec, :audio_bitrate, :audio_sample_rate, :audio_channels, :audio_tags
     attr_reader :container
     attr_reader :metadata, :format_tags
+    attr_reader :stdout, :stderr
 
     UNSUPPORTED_CODEC_PATTERN = /^Unsupported codec with id (\d+) for input stream (\d+)$/
 
@@ -26,21 +27,21 @@ module FFMPEG
 
       # ffmpeg will output to stderr
       command = [FFMPEG.ffprobe_binary, '-i', path, *%w(-print_format json -show_format -show_streams -show_error)]
-      std_output = ''
-      std_error = ''
+      @stdout = ''
+      @stderr = ''
 
       Open3.popen3(*command) do |stdin, stdout, stderr|
-        std_output = stdout.read unless stdout.nil?
-        std_error = stderr.read unless stderr.nil?
+        @stdout = stdout.read unless stdout.nil?
+        @stderr = stderr.read unless stderr.nil?
       end
 
-      fix_encoding(std_output)
-      fix_encoding(std_error)
+      fix_encoding(@stdout)
+      fix_encoding(@stderr)
 
       begin
-        @metadata = MultiJson.load(std_output, symbolize_keys: true)
+        @metadata = MultiJson.load(@stdout, symbolize_keys: true)
       rescue MultiJson::ParseError
-        raise "Could not parse output from FFProbe:\n#{ std_output }"
+        raise "Could not parse output from FFProbe:\n#{ @stdout }"
       end
 
       if @metadata.key?(:error)
@@ -123,17 +124,17 @@ module FFMPEG
 
       end
 
-      unsupported_stream_ids = unsupported_streams(std_error)
+      unsupported_stream_ids = unsupported_streams(@stderr)
       nil_or_unsupported = -> (stream) { stream.nil? || unsupported_stream_ids.include?(stream[:index]) }
 
       @invalid = true if nil_or_unsupported.(video_stream) && nil_or_unsupported.(audio_stream)
       @invalid = true if @metadata.key?(:error)
-      @invalid = true if std_error.include?("could not find codec parameters")
+      @invalid = true if @stderr.include?("could not find codec parameters")
     end
 
-    def unsupported_streams(std_error)
+    def unsupported_streams(stderr)
       [].tap do |stream_indices|
-        std_error.each_line do |line|
+        stderr.each_line do |line|
           match = line.match(UNSUPPORTED_CODEC_PATTERN)
           stream_indices << match[2].to_i if match
         end
