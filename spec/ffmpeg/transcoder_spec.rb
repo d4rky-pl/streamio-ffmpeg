@@ -15,12 +15,12 @@ module FFMPEG
         expect { Transcoder.new(movie, output_path, video_codec: "libx264") }.not_to raise_error
       end
 
-      it "should accept String as options" do
-        expect { Transcoder.new(movie, output_path, "-vcodec libx264") }.not_to raise_error
+      it 'should accept Array as options' do
+        expect { Transcoder.new(movie, output_path, %w(-vcodec libx264)) }.not_to raise_error
       end
 
       it "should not accept anything else as options" do
-        expect { Transcoder.new(movie, output_path, ["array?"]) }.to raise_error(ArgumentError, /Unknown options format/)
+        expect { Transcoder.new(movie, output_path, "string?") }.to raise_error(ArgumentError, /Unknown options format/)
       end
     end
 
@@ -58,7 +58,7 @@ module FFMPEG
           end
 
           it 'should still work with (NTSC target)' do
-            encoded = Transcoder.new(movie, "#{tmp_path}/awesome.mpg",  target: 'ntsc-vcd').run
+            encoded = Transcoder.new(movie, "#{tmp_path}/awesome.mpg", target: 'ntsc-vcd').run
             expect(encoded.resolution).to eq('352x240')
           end
 
@@ -92,6 +92,21 @@ module FFMPEG
           expect(encoded.audio_codec).to match(/mp3/)
           expect(encoded.audio_sample_rate).to eq(22050)
           expect(encoded.audio_channels).to eq(1)
+        end
+
+        context 'audio only' do
+          let(:sound) { Movie.new("#{fixture_path}/sounds/hello.wav") }
+          it 'should transcode without video' do
+            FileUtils.rm_f "#{tmp_path}/hello.mp3"
+
+            options = { audio_codec: "libmp3lame", custom: %w(-qscale:a 2)}
+
+            encoded = Transcoder.new(sound, "#{tmp_path}/hello.mp3", options).run
+            expect(encoded.video_codec).to be_nil
+            expect(encoded.audio_codec).to match(/mp3/)
+            expect(encoded.audio_sample_rate).to eq(44100)
+            expect(encoded.audio_channels).to eq(1)
+          end
         end
 
         context "with aspect ratio preservation" do
@@ -134,7 +149,7 @@ module FFMPEG
         it "should transcode the movie with String options" do
           FileUtils.rm_f "#{tmp_path}/string_optionalized.flv"
 
-          encoded = Transcoder.new(movie, "#{tmp_path}/string_optionalized.flv", "-s 300x200 -ac 2").run
+          encoded = Transcoder.new(movie, "#{tmp_path}/string_optionalized.flv", %w(-s 300x200 -ac 2)).run
           expect(encoded.resolution).to eq("300x200")
           expect(encoded.audio_channels).to eq(2)
         end
@@ -199,6 +214,20 @@ module FFMPEG
             encoded = Transcoder.new(movie, "#{tmp_path}/image.png", {screenshot: true, seek_time: 4, resolution: '320x500'}, preserve_aspect_ratio: :width).run
             expect(encoded.resolution).to eq("320x240")
           end
+
+          describe 'for multiple screenshots' do
+            context 'with output file validation' do
+              it 'should fail' do
+                expect { Transcoder.new(movie, "#{tmp_path}/invalid_%d.png", {screenshot: true, seek_time: 4, resolution: '320x500'}, preserve_aspect_ratio: :width).run }.to raise_error(FFMPEG::Error, /Failed encoding/)
+              end
+            end
+            context 'without output file validation' do
+              it 'should create sequential screenshots' do
+                Transcoder.new(movie, "#{tmp_path}/screenshots_%d.png", {screenshot: true, seek_time: 4, resolution: '320x500'}, preserve_aspect_ratio: :width, validate: false).run
+                expect(Dir[File.join(tmp_path, 'screenshots_*.png')].count { |file| File.file?(file) }).to eq(1)
+              end
+            end
+          end
         end
 
         context "audio only" do
@@ -212,7 +241,7 @@ module FFMPEG
 
           it 'should fail when the timeout is exceeded' do
             transcoder = Transcoder.new(movie, "#{tmp_path}/timeout.mp4")
-            expect { transcoder.run }.to raise_error
+            expect { transcoder.run }.to raise_error(FFMPEG::Error, /Errors: no output file created/)
           end
 
           after do
@@ -223,22 +252,134 @@ module FFMPEG
       end
     end
 
-    context "with :validate => false set as transcoding_options" do
-      let(:transcoder) { Transcoder.new(movie, "tmp.mp4", {},{:validate => false}) }
+    describe 'watermarking' do
+      context 'with default transcoder_options' do
 
-      before { allow(transcoder).to receive(:transcode_movie) }
-      after { FileUtils.rm_f "#{tmp_path}/tmp.mp4" }
+        it 'should transcode the movie with the watermark' do
+          options = { watermark: "#{fixture_path}/images/watermark.png", watermark_filter: { position: 'RB' }  }
+          transcoder = Transcoder.new(movie, "#{tmp_path}/watermarked.mp4", options)
+          expect { transcoder.run }.not_to raise_error
+        end
+      end
+    end
 
-      it "should not validate the movie output" do
-        expect(transcoder).to_not receive(:validate_output_file)
-        allow(transcoder).to receive(:encoded)
-        transcoder.run
+    describe 'transcoding_options' do
+      let(:transcoder) { Transcoder.new(movie, "#{tmp_path}/tmp.mp4", options, transcoding_options) }
+
+      context 'with validate: false' do
+        let(:options) { {} }
+        let(:transcoding_options) { {validate: false} }
+
+        before { allow(transcoder).to receive(:transcode_movie) }
+        after { FileUtils.rm_f "#{tmp_path}/tmp.mp4" }
+
+        it 'should not validate the movie output' do
+          expect(transcoder).to_not receive(:validate_output_file)
+          allow(transcoder).to receive(:encoded)
+          transcoder.run
+        end
+
+        it 'should not return Movie object' do
+          allow(transcoder).to receive(:validate_output_file)
+          expect(transcoder).to_not receive(:encoded)
+          expect(transcoder.run).to eq(nil)
+        end
       end
 
-      it "should not return Movie object" do
-        allow(transcoder).to receive(:validate_output_file)
-        expect(transcoder).to_not receive(:encoded)
-        expect(transcoder.run).to eq(nil)
+      context 'with custom options' do
+        let(:options) { {
+            video_codec: 'libx264',
+            custom: %w(-map 0:0 -map 0:1)
+          } }
+        let(:transcoding_options) { {} }
+
+        it 'should not raise an error' do
+          expect { transcoder.run }.to_not raise_error
+        end
+
+        it 'should add the custom options to the command' do
+          expect(transcoder.command.join(' ')).to include('-map 0:0 -map 0:1')
+        end
+      end
+
+      context 'with input' do
+        let(:input_path) { 'path/img_%03d.gif' }
+
+        context 'is a movie' do
+          context 'and no input is specified' do
+            let(:transcoder) { Transcoder.new(movie, 'tmp.mp4') }
+
+            it "should use the movie's path" do
+              expect(transcoder.input).to eq(movie.path)
+            end
+
+            it 'should add the input to the shell command' do
+              expect(transcoder.command.join(' ')).to include(" -i #{transcoder.input}")
+            end
+          end
+
+          context 'and an input is also specified' do
+            let(:transcoder) { Transcoder.new(movie, 'tmp.mp4', {}, input: input_path) }
+
+            it 'should use the provided input' do
+              expect(transcoder.input).to eq(input_path)
+            end
+          end
+        end
+
+        context 'is a path spec' do
+          let(:transcoder) { Transcoder.new(movie, 'tmp.mp4', {}, input: input_path) }
+
+          it "should use the input path" do
+            expect(transcoder.input).to eq(input_path)
+          end
+        end
+      end
+
+      context 'with input_options' do
+        let(:option) { {framerate: '1/5'} }
+        let(:transcoder) { Transcoder.new(movie, 'tmp.mp4', {}, input_options: option) }
+
+        it 'should add the input_options before the input' do
+          expect(transcoder.command.join(' ')).to include("-framerate 1/5 -i #{transcoder.input}")
+        end
+
+        context 'to create a slideshow' do
+          let(:file_spec) { "#{fixture_path}/images/img_%03d.jpeg"}
+          let(:output) { "#{tmp_path}/slideshow.mp4"}
+          let(:transcoder) { Transcoder.new(movie, output, {}, input: file_spec, input_options: option) }
+
+          it 'should add the input_options before the input' do
+            expect(transcoder.command.join(' ')).to include("-framerate 1/5 -i #{file_spec}")
+          end
+
+          it 'should not raise an error' do
+            expect { transcoder.run }.to_not raise_error
+          end
+
+          it 'should produce the slideshow' do
+            encoded = transcoder.run
+            expect(encoded.duration).to eq(25)
+          end
+
+          context 'with source files where file type name does not match the image type' do
+            let(:file_spec) { "#{fixture_path}/images/wrong_type/img_%03d.tiff"}
+            let(:output) { "#{tmp_path}/slideshow_fail.mp4"}
+
+            it 'should raise an error' do
+              expect { transcoder.run }.to raise_error(FFMPEG::Error, /encoded file is invalid/)
+            end
+          end
+
+          context 'with no movie defined' do
+            let(:movie) { nil }
+
+            it 'should not raise an error' do
+              expect { transcoder.run }.to_not raise_error
+            end
+          end
+
+        end
       end
     end
   end

@@ -1,4 +1,5 @@
 require 'spec_helper.rb'
+require 'net/http'
 require 'webrick'
 
 module FFMPEG
@@ -27,10 +28,10 @@ module FFMPEG
         end
       end
 
-      context "given an URL" do
+      context "given a URL" do
+        before(:context) { start_web_server }
+        after(:context) { stop_web_server }
         context "that is correct" do
-          before(:context) { start_web_server }
-          after(:context) { stop_web_server }
 
           let(:movie) { Movie.new("http://127.0.0.1:8000/awesome%20movie.mov") }
 
@@ -49,18 +50,56 @@ module FFMPEG
           it "should be marked as remote" do
             expect(movie.remote?).to be_truthy
           end
-        end
-        context "that is incorrect" do
-          it "should raise an exception" do
-            expect { Movie.new("http://127.0.0.1:8000/awesome%20movie.mov") }.to raise_error(Errno::ENOENT)
+
+          context 'with a query string' do
+            # We're mocking this to fail on the same URL with the query string added.
+            # This means that we're passing the query string through using .request_uri
+            # rather than .path
+
+            it 'should not be found' do
+              expect { Movie.new('http://127.0.0.1:8000/awesome%20movie.mov?fail=1') }.to raise_error(Errno::ENOENT)
+            end
           end
-        end          
+        end
+        context "that does not exist" do
+          it "should raise an exception" do
+            expect { Movie.new("http://127.0.0.1:8000/awesome%20movie_missing.mov") }.to raise_error(Errno::ENOENT)
+          end
+        end
+        context 'that redirects' do
+          context 'to a remote uri' do
+            let(:movie) { Movie.new('http://www.redirect-example.com/moved_movie.mov') }
+
+            it "should know the file size" do
+              expect(movie.size).to eq(455_546)
+            end
+          end
+          context 'to a relative uri' do
+            let(:movie) { Movie.new('http://127.0.0.1:8000/deep_path/awesome%20movie.mov') }
+
+            it 'should know the file size' do
+              expect(movie.size).to eq(455_546)
+            end
+          end
+          context 'to a relative uri respecting redirect limits' do
+            before { FFMPEG.max_http_redirect_attempts = 0 }
+            after { FFMPEG.max_http_redirect_attempts = nil }
+
+            it 'raise FFMPEG::HTTPTooManyRequests' do
+              expect { Movie.new('http://127.0.0.1:8000/deep_path/awesome%20movie.mov') }.to raise_error(FFMPEG::HTTPTooManyRequests)
+            end
+          end
+
+          context 'to a relative uri with too many redirects' do
+            it 'should know the file size' do
+              expect { Movie.new('http://www.toomany-redirects-example.com/moved_movie.mov') }.to raise_error(FFMPEG::HTTPTooManyRequests)
+            end
+          end
+        end
       end
 
       context "given a non movie file" do
-        let(:movie) do
-          movie = Movie.new(__FILE__)
-        end
+        let(:movie) { Movie.new(__FILE__) }
 
         it "should not be valid" do
           expect(movie).to_not be_valid
@@ -140,6 +179,14 @@ module FFMPEG
         end
       end
 
+      context "given an ios9 mov file (with superfluous data streams)" do
+        let(:movie) { Movie.new("#{fixture_path}/movies/ios9.mov") }
+
+        it "should be valid" do
+          expect(movie).to be_valid
+        end
+      end
+
       context "given a broken mp4 file" do
         let(:movie) { Movie.new("#{fixture_path}/movies/broken.mp4") }
 
@@ -154,6 +201,14 @@ module FFMPEG
 
       context "given a file with data streams" do
         let(:movie) { Movie.new("#{fixture_path}/movies/file_with_data_streams.mp4") }
+
+        it "should be valid" do
+          expect(movie).to be_valid
+        end
+      end
+
+      context "given a file named with URL characters" do
+        let(:movie) { Movie.new("#{fixture_path}/movies/file+with+data&streams=works?.mp4") }
 
         it "should be valid" do
           expect(movie).to be_valid
@@ -178,15 +233,30 @@ module FFMPEG
           Movie.new(__FILE__)
         end
 
+        context "given a file with bad JSON" do
+          let(:fixture_file) { 'file_with_bad_json.txt' }
+
+          it 'should raise an exception' do
+            expect { movie }.to raise_error RuntimeError, /Could not parse output from FFProbe/
+          end
+        end
+
         context "given an impossible DAR" do
           let(:fixture_file) { 'file_with_weird_dar.txt' }
 
           it "should parse the DAR" do
-            expect(movie.dar).to eq("0:1")
+            expect(movie.dar).to eq('0:1')
           end
 
           it "should calculate using width and height instead" do
             expect(movie.calculated_aspect_ratio.to_s[0..14]).to eq("1.7777777777777") # substringed to be 1.9 compatible
+          end
+
+          context 'when width/height is flipped' do
+            before { movie.instance_variable_set :@rotation, 90 }
+            it "should calculate using width and height instead" do
+              expect(movie.calculated_aspect_ratio).to eq(0.5625)
+            end
           end
         end
 
@@ -199,6 +269,13 @@ module FFMPEG
 
           it 'should using square SAR, 1.0 instead' do
             expect(movie.calculated_pixel_aspect_ratio.to_s[0..14]).to eq('1') # substringed to be 1.9 compatible
+          end
+
+          context 'when width/height is flipped' do
+            before { movie.instance_variable_set :@rotation, 90 }
+            it 'should using square SAR, 1.0 instead' do
+              expect(movie.calculated_pixel_aspect_ratio).to eq(1)
+            end
           end
         end
 
@@ -234,11 +311,32 @@ module FFMPEG
             Movie.new(__FILE__)
           end
 
+          it "should be valid" do
+            expect(movie).to be_valid
+          end
+        end
+
+        context "given a file with non supported audio and video" do
+          let(:fixture_file) { 'file_with_non_supported_audio_and_video_stdout.txt' }
+          let(:movie) do
+            fake_stderr = StringIO.new(File.read("#{fixture_path}/outputs/file_with_non_supported_audio_and_video_stderr.txt"))
+            allow(Open3).to receive(:popen3).and_yield(nil, fake_output, fake_stderr)
+            Movie.new(__FILE__)
+          end
+
           it "should not be valid" do
             expect(movie).to_not be_valid
           end
         end
 
+      end
+
+      context 'given a file with improperly formatted creation_time' do
+        let(:movie) { Movie.new("#{fixture_path}/sounds/bad_metadata_creation_time.wav") }
+
+        it 'should set creation_time to nil' do
+          expect(movie.creation_time).to be_nil
+        end
       end
 
       context "given a weird storage/pixel aspect ratio file" do
@@ -255,6 +353,14 @@ module FFMPEG
 
       context "given an awesome movie file" do
         let(:movie) { Movie.new("#{fixture_path}/movies/awesome movie.mov") }
+
+        it 'exposes the format tags' do
+          expect(movie.format_tags.keys).to include(:major_brand, :minor_version, :compatible_brands, :creation_time)
+        end
+
+        it 'exposes the metadata' do
+          expect(movie.metadata.keys).to include(:streams, :format)
+        end
 
         it "should remember the movie path" do
           expect(movie.path).to eq("#{fixture_path}/movies/awesome movie.mov")
@@ -345,6 +451,44 @@ module FFMPEG
           expect(movie.container).to eq("mov,mp4,m4a,3gp,3g2,mj2")
         end
       end
+
+      context "given a movie file with 2 audio streams" do
+        let(:movie) { Movie.new("#{fixture_path}/movies/multi_audio_movie.mp4") }
+
+        it "should identify both audio streams" do
+          expect(movie.audio_streams.length).to eq(2)
+        end
+
+        it "should assign audio_channels to the properties of the first stream" do
+          audio_channels = movie.audio_streams[0][:channels]
+          expect(movie.audio_channels).to eq audio_channels
+        end
+
+        it "should assign audio_codec to the properties of the first stream" do
+          audio_codec = movie.audio_streams[0][:codec_name]
+          expect(movie.audio_codec).to eq audio_codec
+        end
+
+        it "should assign audio_bitrate to the properties of the first stream" do
+          audio_bitrate = movie.audio_streams[0][:bitrate]
+          expect(movie.audio_bitrate).to eq audio_bitrate
+        end
+
+        it "should assign audio_channel_layout to the properties of the first stream" do
+          audio_channel_layout = movie.audio_streams[0][:channel_layout]
+          expect(movie.audio_channel_layout).to eq audio_channel_layout
+        end
+
+        it "should assign audio_tags to the properties of the first stream" do
+          audio_tags = movie.audio_streams[0][:tags]
+          expect(movie.audio_tags).to eq audio_tags
+        end
+
+        it "should assign audio_stream to the properties of the first stream" do
+          stream_overview = movie.audio_streams[0][:overview]
+          expect(movie.audio_stream).to eq stream_overview
+        end
+      end
     end
 
     context "given a rotated movie file" do
@@ -370,6 +514,36 @@ module FFMPEG
       end
     end
 
+    describe "transcode" do
+      let(:movie) { Movie.new("#{fixture_path}/movies/awesome movie.mov")}
+
+      it "should run the transcoder" do
+
+        transcoder_double = double(Transcoder)
+        expect(Transcoder).to receive(:new).
+            with(movie, "#{tmp_path}/awesome.flv", {custom: "-vcodec libx264"}, preserve_aspect_ratio: :width).
+            and_return(transcoder_double)
+        expect(transcoder_double).to receive(:run)
+
+        movie.transcode("#{tmp_path}/awesome.flv", {custom: "-vcodec libx264"}, preserve_aspect_ratio: :width)
+      end
+    end
+
+    describe 'transcode sound only' do
+      let(:movie) { Movie.new("#{fixture_path}/sounds/hello.wav")}
+
+      it "should run the transcoder" do
+
+        transcoder_double = double(Transcoder)
+        expect(Transcoder).to receive(:new).
+            with(movie, "#{tmp_path}/hello.mp3", {audio_codec: 'libmp3lame', custom: %w(-qscale:a 2)}, {}).
+            and_return(transcoder_double)
+        expect(transcoder_double).to receive(:run)
+
+        movie.transcode("#{tmp_path}/hello.mp3", {audio_codec: 'libmp3lame', custom: %w(-qscale:a 2)}, {})
+      end
+    end
+
     describe "screenshot" do
       let(:movie) { Movie.new("#{fixture_path}/movies/awesome movie.mov")}
 
@@ -382,6 +556,19 @@ module FFMPEG
         expect(transcoder_double).to receive(:run)
 
         movie.screenshot("#{tmp_path}/awesome.jpg", {seek_time: 2, dimensions: "640x480"}, preserve_aspect_ratio: :width)
+      end
+
+      context 'with wildcard output filename' do
+        it 'should create multiple screenshots' do
+
+          transcoder_double = double(Transcoder)
+          expect(Transcoder).to receive(:new).
+              with(movie, "#{tmp_path}/awesome_%d.jpg", {seek_time: 2, dimensions: '640x480', screenshot: true, vframes: 20}, preserve_aspect_ratio: :width, validate: false).
+              and_return(transcoder_double)
+          expect(transcoder_double).to receive(:run)
+
+          movie.screenshot("#{tmp_path}/awesome_%d.jpg", {seek_time: 2, dimensions: '640x480', vframes: 20}, preserve_aspect_ratio: :width, validate: false)
+        end
       end
     end
   end
