@@ -57,7 +57,16 @@ module FFMPEG
             # rather than .path
 
             it 'should not be found' do
-              expect { Movie.new('http://127.0.0.1:8000/awesome%20movie.mov?fail=1') }.to raise_error(Errno::ENOENT)
+              expect { Movie.new('http://127.0.0.1:8000/awesome%20movie.mov?fail=1') }.to raise_error(FFMPEG::UrlInputError)
+            end
+          end
+
+          context 'for existing file with no access' do
+            it 'should raise an exception' do
+              expect { Movie.new('http://127.0.0.1:8000/unauthorized.mov') }.to raise_error do |error|
+                expect(error).to be_a(FFMPEG::UrlInputError)
+                expect(error.response.code.to_i).to eq(403)
+              end
             end
           end
 
@@ -69,7 +78,10 @@ module FFMPEG
         end
         context "that does not exist" do
           it "should raise an exception" do
-            expect { Movie.new("http://127.0.0.1:8000/awesome%20movie_missing.mov") }.to raise_error(Errno::ENOENT)
+            expect { Movie.new("http://127.0.0.1:8000/awesome%20movie_missing.mov") }.to raise_error do |error|
+              expect(error).to be_a(FFMPEG::UrlInputError)
+              expect(error.response.code.to_i).to eq(404)
+            end
           end
         end
         context 'that redirects' do
